@@ -1,0 +1,106 @@
+{
+    "name": "vscode-clangd-filter-files",
+    "publisher": "sr-team",
+    "author": "SR_team",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/sr-tream/vscode-clangd-filter-files.git"
+    },
+    "bugs": {
+        "url": "https://github.com/sr-tream/vscode-clangd-filter-files/issues"
+    },
+    "homepage": "https://github.com/sr-tream/vscode-clangd-filter-files#readme",
+    "displayName": "clangd Filter Files",
+    "description": "Stop clangd from indexing or answering requests for files outside the workspace.",
+    "version": "0.3.4",
+    "engines": {
+        "vscode": "^1.75.0"
+    },
+    "categories": [
+        "Other"
+    ],
+    "extensionDependencies": [
+        "llvm-vs-code-extensions.vscode-clangd"
+    ],
+    "activationEvents": [
+        "onLanguage:c",
+        "onLanguage:cpp",
+        "onLanguage:cuda-cpp",
+        "onLanguage:objective-c",
+        "onLanguage:objective-cpp"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "configuration": {
+            "title": "clangd Filter Files",
+            "properties": {
+                "clangd-filter-files.allowedSchemes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [
+                        "file"
+                    ],
+                    "description": "URI schemes that participate in workspace-folder filtering. Documents with any other scheme are passed through unchanged."
+                },
+                "clangd-filter-files.log": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Log filtered events to the 'clangd Filter Files' output channel."
+                },
+                "clangd-filter-files.notify.statusBar": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Show a status bar item when the active editor is a C/C++ file outside any workspace folder (not indexed by clangd)."
+                },
+                "clangd-filter-files.notify.toast": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Show a one-time warning notification when a C/C++ file outside any workspace folder is opened."
+                },
+                "clangd-filter-files.notify.diagnostic": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Emit an Information diagnostic on line 1 of C/C++ files outside any workspace folder."
+                },
+                "clangd-filter-files.notify.banner": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Render a warning banner over line 1 of C/C++ files outside any workspace folder. The banner scrolls with the editor."
+                },
+                "clangd-filter-files.notify.bannerExtraLineOffset": {
+                    "type": "integer",
+                    "default": 0,
+                    "minimum": 0,
+                    "description": "Additional lines to push the banner below the topmost visible line. Stacked on top of the automatic offset that avoids the editor.stickyScroll panel."
+                }
+            }
+        },
+        "commands": [
+            {
+                "command": "clangd-filter-files.reattach",
+                "title": "clangd Filter Files: Reattach Middleware",
+                "category": "clangd"
+            },
+            {
+                "command": "clangd-filter-files.addParentFolder",
+                "title": "clangd Filter Files: Add Containing Folder to Workspace",
+                "category": "clangd"
+            }
+        ]
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run build -- --minify",
+        "build": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
+        "watch": "npm run build -- --sourcemap --watch",
+        "typecheck": "tsc -noEmit"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "@types/vscode": "^1.75.0",
+        "esbuild": "^0.25.0",
+        "typescript": "^5.5.0"
+    }
+}
