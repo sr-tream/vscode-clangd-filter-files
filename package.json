@@ -13,7 +13,7 @@
     "homepage": "https://github.com/sr-tream/vscode-clangd-filter-files#readme",
     "displayName": "clangd Filter Files",
     "description": "Stop clangd from indexing or answering requests for files outside the workspace.",
-    "version": "0.3.4",
+    "version": "0.3.5",
     "engines": {
         "vscode": "^1.75.0"
     },

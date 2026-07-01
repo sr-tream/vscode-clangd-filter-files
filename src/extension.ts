@@ -9,7 +9,9 @@ interface StateChangeEvent { oldState: LCState; newState: LCState; }
 
 interface MutableLanguageClient {
     clientOptions: { middleware?: any };
+    diagnostics?: vscode.DiagnosticCollection;
     onDidChangeState(listener: (e: StateChangeEvent) => void): vscode.Disposable;
+    sendNotification?(method: string, params?: any): Promise<void>;
     state: LCState;
 }
 
@@ -41,9 +43,72 @@ function isOutsideWorkspace(uri: vscode.Uri | undefined): boolean {
 }
 
 const CLANGD_LANGS = new Set(['c', 'cpp', 'cuda-cpp', 'objective-c', 'objective-cpp']);
+const DID_CLOSE_TEXT_DOCUMENT = 'textDocument/didClose';
+const POST_CLOSE_DIAGNOSTIC_CLEAR_DELAYS_MS = [250, 1000, 2500];
 
 function isClangdFiltered(doc: vscode.TextDocument): boolean {
     return CLANGD_LANGS.has(doc.languageId) && isOutsideWorkspace(doc.uri);
+}
+
+function documentOrUriUri(document: vscode.TextDocument | vscode.Uri): vscode.Uri {
+    return document instanceof vscode.Uri ? document : document.uri;
+}
+
+function emptyDiagnosticReport(): any {
+    return { kind: 'full', items: [] };
+}
+
+function filterWorkspaceDiagnosticReport(report: any): any {
+    if (!report || !Array.isArray(report.items)) return report;
+
+    const items = report.items.filter((item: any) => !isOutsideWorkspace(item?.uri));
+    if (items.length === report.items.length) return report;
+    return { ...report, items };
+}
+
+function clearClientDiagnostics(client: MutableLanguageClient, uri: vscode.Uri): void {
+    const diagnostics = client.diagnostics;
+    if (!diagnostics) {
+        log(`cannot clear diagnostics ${uri.toString()}; language client has no diagnostics collection`);
+        return;
+    }
+    diagnostics.set(uri, []);
+    log(`cleared diagnostics ${uri.toString()}`);
+}
+
+function clearAlreadyOpenFilteredDiagnostics(client: MutableLanguageClient): void {
+    for (const doc of vscode.workspace.textDocuments) {
+        if (isClangdFiltered(doc)) clearClientDiagnostics(client, doc.uri);
+    }
+}
+
+async function closeAlreadyOpenFilteredDocuments(client: MutableLanguageClient): Promise<void> {
+    const docs = vscode.workspace.textDocuments.filter(isClangdFiltered);
+    if (docs.length === 0) return;
+
+    const sendNotification = client.sendNotification?.bind(client);
+    log(`closing ${docs.length} already-open filtered document(s) in clangd`);
+    for (const doc of docs) {
+        if (sendNotification) {
+            try {
+                await sendNotification(DID_CLOSE_TEXT_DOCUMENT, {
+                    textDocument: { uri: doc.uri.toString() },
+                });
+                log(`sent didClose ${doc.uri.toString()}`);
+            } catch (err) {
+                log(`failed didClose ${doc.uri.toString()}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+        } else {
+            log('cannot close already-open filtered documents; language client has no sendNotification');
+        }
+        clearClientDiagnostics(client, doc.uri);
+    }
+}
+
+function scheduleDelayedDiagnosticsClear(client: MutableLanguageClient): void {
+    for (const delay of POST_CLOSE_DIAGNOSTIC_CLEAR_DELAYS_MS) {
+        setTimeout(() => clearAlreadyOpenFilteredDiagnostics(client), delay);
+    }
 }
 
 class Notifier implements vscode.Disposable {
@@ -234,10 +299,47 @@ function buildMiddleware(prev: Record<string, any>): Record<string, any> {
     const docUri = (d: vscode.TextDocument) => d.uri;
     const evtUri = (e: vscode.TextDocumentChangeEvent) => e.document.uri;
     const willSaveUri = (e: vscode.TextDocumentWillSaveEvent) => e.document.uri;
+    const prevHandleDiagnostics = prev.handleDiagnostics;
+    const prevProvideDiagnostics = prev.provideDiagnostics;
+    const prevProvideWorkspaceDiagnostics = prev.provideWorkspaceDiagnostics;
 
     return {
         ...prev,
         [SENTINEL]: true,
+
+        handleDiagnostics: (uri: vscode.Uri, diagnostics: vscode.Diagnostic[], next: any) => {
+            if (isOutsideWorkspace(uri)) {
+                log(`clear diagnostics ${uri.toString()}`);
+                next(uri, []);
+                return;
+            }
+            if (prevHandleDiagnostics) {
+                prevHandleDiagnostics(uri, diagnostics, next);
+                return;
+            }
+            next(uri, diagnostics);
+        },
+
+        provideDiagnostics: (document: vscode.TextDocument | vscode.Uri, previousResultId: string | undefined, token: vscode.CancellationToken, next: any) => {
+            const uri = documentOrUriUri(document);
+            if (isOutsideWorkspace(uri)) {
+                log(`clear pull diagnostics ${uri.toString()}`);
+                return emptyDiagnosticReport();
+            }
+            if (prevProvideDiagnostics) {
+                return prevProvideDiagnostics(document, previousResultId, token, next);
+            }
+            return next(document, previousResultId, token);
+        },
+
+        provideWorkspaceDiagnostics: (resultIds: any[], token: vscode.CancellationToken, resultReporter: any, next: any) => {
+            const filteredResultIds = resultIds.filter((result) => !isOutsideWorkspace(result.uri));
+            const filteredReporter = (chunk: any) => resultReporter(filterWorkspaceDiagnosticReport(chunk));
+            const result = prevProvideWorkspaceDiagnostics
+                ? prevProvideWorkspaceDiagnostics(filteredResultIds, token, filteredReporter, next)
+                : next(filteredResultIds, token, filteredReporter);
+            return Promise.resolve(result).then(filterWorkspaceDiagnosticReport);
+        },
 
         didOpen: dropNotification('didOpen', docUri),
         didChange: dropNotification('didChange', evtUri),
@@ -291,7 +393,11 @@ let stateSub: vscode.Disposable | undefined;
 function install(client: MutableLanguageClient): void {
     const opts = client.clientOptions ?? ((client as any).clientOptions = {});
     const prev = opts.middleware ?? {};
-    if (prev[SENTINEL] && client === attachedClient) return;
+    if (prev[SENTINEL]) {
+        attachedClient = client;
+        log('middleware already installed');
+        return;
+    }
     opts.middleware = buildMiddleware(prev);
     attachedClient = client;
     log('middleware installed');
@@ -312,23 +418,42 @@ async function getExtension(): Promise<vscode.Extension<ClangdExtension> | undef
 const REATTACH_POLL_MS = 200;
 const REATTACH_MAX_ATTEMPTS = 50;
 
-function attach(ext: vscode.Extension<ClangdExtension>, attempt = 0): void {
-    stateSub?.dispose();
-    stateSub = undefined;
+function retryAttach(ext: vscode.Extension<ClangdExtension>, attempt: number): void {
+    if (attempt < REATTACH_MAX_ATTEMPTS) {
+        setTimeout(() => attach(ext, attempt + 1), REATTACH_POLL_MS);
+    } else {
+        log('giving up reattach; use clangd-filter-files.reattach to retry');
+    }
+}
 
+function attach(ext: vscode.Extension<ClangdExtension>, attempt = 0): void {
     const client = ext.exports.getApi(1).languageClient;
-    if (!client || client === attachedClient) {
-        if (attempt < REATTACH_MAX_ATTEMPTS) {
-            setTimeout(() => attach(ext, attempt + 1), REATTACH_POLL_MS);
-        } else {
-            log('giving up reattach; use clangd-filter-files.reattach to retry');
-        }
+    if (!client || client.state === LCState.Stopped) {
+        retryAttach(ext, attempt);
         return;
     }
 
+    if (client === attachedClient) {
+        return;
+    }
+
+    stateSub?.dispose();
+    stateSub = undefined;
+
     install(client);
 
+    let closedAlreadyOpenDocs = false;
+    const closeAlreadyOpenDocs = () => {
+        if (closedAlreadyOpenDocs || client.state !== LCState.Running) return;
+        closedAlreadyOpenDocs = true;
+        void closeAlreadyOpenFilteredDocuments(client);
+        scheduleDelayedDiagnosticsClear(client);
+    };
+
+    closeAlreadyOpenDocs();
+
     stateSub = client.onDidChangeState(({ newState }) => {
+        if (newState === LCState.Running) closeAlreadyOpenDocs();
         if (newState !== LCState.Stopped) return;
         log('language client stopped; awaiting new instance');
         stateSub?.dispose();
